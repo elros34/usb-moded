@@ -75,9 +75,9 @@ static char           *modesetting_strip                      (char *str);
 static char           *modesetting_read_from_file             (const char *path, size_t maxsize);
 int                    modesetting_write_to_file_real         (const char *file, int line, const char *func, const char *path, const char *text);
 bool                   modesetting_is_mounted                 (const char *mountpoint);
-bool                   modesetting_mount                      (const char *mountpoint);
-bool                   modesetting_unmount                    (const char *mountpoint);
-static gchar          *modesetting_mountdev                   (const char *mountpoint);
+bool                   modesetting_mount                      (const char *mountdev);
+bool                   modesetting_unmount                    (const char *mountdev);
+static gchar          *modesetting_mountpoint                 (const char *mountdev);
 static void            modesetting_free_storage_info          (storage_info_t *info);
 static storage_info_t *modesetting_get_storage_info           (size_t *pcount);
 static bool            modesetting_enter_mass_storage_mode    (const modedata_t *data);
@@ -300,30 +300,33 @@ bool modesetting_is_mounted(const char *mountpoint)
 {
     LOG_REGISTER_CONTEXT;
 
+    if( mountpoint == NULL )
+        return false;
+
     char cmd[256];
     snprintf(cmd, sizeof cmd, "/bin/mountpoint -q '%s'", mountpoint);
     return common_system(cmd) == 0;
 }
 
-bool modesetting_mount(const char *mountpoint)
+bool modesetting_mount(const char *mountdev)
 {
     LOG_REGISTER_CONTEXT;
 
     char cmd[256];
-    snprintf(cmd, sizeof cmd, "/bin/mount '%s'", mountpoint);
+    snprintf(cmd, sizeof cmd, "udisksctl-user mount -b %s", mountdev);
     return common_system(cmd) == 0;
 }
 
-bool modesetting_unmount(const char *mountpoint)
+bool modesetting_unmount(const char *mountdev)
 {
     LOG_REGISTER_CONTEXT;
 
     char cmd[256];
-    snprintf(cmd, sizeof cmd, "/bin/umount '%s'", mountpoint);
+    snprintf(cmd, sizeof cmd, "udisksctl-user unmount -b %s", mountdev);
     return common_system(cmd) == 0;
 }
 
-static gchar *modesetting_mountdev(const char *mountpoint)
+static char *modesetting_mountpoint(const char *mountdev)
 {
     LOG_REGISTER_CONTEXT;
 
@@ -331,12 +334,12 @@ static gchar *modesetting_mountdev(const char *mountpoint)
     FILE *fh  = 0;
     struct mntent *me;
 
-    if( !(fh = setmntent("/etc/fstab", "r")) )
+    if( !(fh = setmntent("/proc/mounts", "r")) )
         goto EXIT;
 
     while( (me = getmntent(fh)) ) {
-        if( !strcmp(me->mnt_dir, mountpoint) ) {
-            res = g_strdup(me->mnt_fsname);
+        if( !strcmp(me->mnt_fsname, mountdev) ) {
+            res = g_strdup(me->mnt_dir);
             break;
         }
     }
@@ -345,7 +348,7 @@ EXIT:
     if( fh )
         endmntent(fh);
 
-    log_debug("%s -> %s", mountpoint, res);
+    log_debug("%s -> %s", mountdev, res);
 
     return res;
 }
@@ -375,19 +378,19 @@ modesetting_get_storage_info(size_t *pcount)
     char            *setting = 0;
     gchar          **array   = 0;
 
-    /* Get comma separated mountpoint list from config */
-    if( !(setting = config_find_mounts()) ) {
-        log_warning("no mount points configuration");
+    /* Get comma separated mountdevice list from config */
+    if( !(setting = config_find_mountdevices()) ) {
+        log_warning("no mount devices configuration");
         goto EXIT;
     }
 
-    /* Split mountpoint list to array and count number of items */
+    /* Split device list to array and count number of items */
     array = g_strsplit(setting, ",", 0);
     while( array[count] )
         ++count;
 
     if( count < 1 ) {
-        log_warning("no mount points configured");
+        log_warning("no devices configured");
         goto EXIT;
     }
 
@@ -395,23 +398,19 @@ modesetting_get_storage_info(size_t *pcount)
     info = g_new0(storage_info_t, count + 1);
 
     for( size_t i = 0; i < count; ++i ) {
-        const gchar *mountpnt = info[i].si_mountpoint = g_strdup(array[i]);
-
-        if( access(mountpnt, F_OK) == -1 ) {
-            log_warning("mountpoint %s does not exist", mountpnt);
-            goto EXIT;
-        }
-
-        const gchar *mountdev = info[i].si_mountdevice = modesetting_mountdev(mountpnt);
-
-        if( !mountdev ) {
-            log_warning("can't find device for %s", mountpnt);
-            goto EXIT;
-        }
+        const gchar *mountdev = info[i].si_mountdevice = g_strdup(array[i]);
 
         if( access(mountdev, F_OK) == -1 ) {
             log_warning("mount device %s does not exist", mountdev);
             goto EXIT;
+        }
+
+        const gchar *mountpnt = info[i].si_mountpoint = modesetting_mountpoint(mountdev);
+
+        if( !mountpnt ) {
+            // It can be unmounted
+            mountpnt = g_strdup(" ");
+            log_warning("can't find mountpoint for %s", mountdev);
         }
     }
 
@@ -458,6 +457,7 @@ static bool modesetting_enter_mass_storage_mode(const modedata_t *data)
     for( size_t i = 0 ; i < count; ++i )
     {
         const gchar *mountpnt = info[i].si_mountpoint;
+        const gchar *mountdev = info[i].si_mountdevice;
         for( int tries = 0; ; ) {
 
             if( !modesetting_is_mounted(mountpnt) ) {
@@ -465,8 +465,8 @@ static bool modesetting_enter_mass_storage_mode(const modedata_t *data)
                 break;
             }
 
-            if( modesetting_unmount(mountpnt) ) {
-                log_debug("unmounted %s", mountpnt);
+            if( modesetting_unmount(mountdev) ) {
+                log_debug("unmounted %s", mountdev);
                 break;
             }
 
@@ -628,14 +628,15 @@ static int modesetting_leave_mass_storage_mode(const modedata_t *data)
 
     for( size_t i = 0 ; i < count; ++i ) {
         const char *mountpnt = info[i].si_mountpoint;
+        const char *mountdev = info[i].si_mountdevice;
 
         if( modesetting_is_mounted(mountpnt) ) {
             log_debug("%s is already mounted", mountpnt);
             continue;
         }
 
-        if( modesetting_mount(mountpnt) ) {
-            log_debug("mounted %s", mountpnt);
+        if( modesetting_mount(mountdev) ) {
+            log_debug("mounted %s", mountdev);
             continue;
         }
 

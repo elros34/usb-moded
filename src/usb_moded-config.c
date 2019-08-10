@@ -61,6 +61,7 @@
 
 static int           config_validate_ip              (const char *ipadd);
 char                *config_find_mounts              (void);
+char                *config_find_mountdevices        (void);
 int                  config_find_sync                (void);
 char                *config_find_alt_mount           (void);
 char                *config_find_udev_path           (void);
@@ -150,6 +151,21 @@ char *config_find_mounts(void)
     {
         ret = g_strdup(FS_MOUNT_DEFAULT);
         //log_debug("Default mount = %s\n", ret);
+    }
+    return ret;
+}
+
+char *config_find_mountdevices(void)
+{
+    LOG_REGISTER_CONTEXT;
+
+    char *ret = NULL;
+
+    ret = config_get_conf_string(FS_DEVICE_ENTRY, FS_DEVICE_KEY);
+    if(ret == NULL)
+    {
+        ret = g_strdup(FS_DEVICE_DEFAULT);
+        log_debug("Default device = %s\n", ret);
     }
     return ret;
 }
